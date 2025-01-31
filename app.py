@@ -139,7 +139,8 @@ def main():
                 label="Download as Excel",
                 data=excel_bytes,
                 file_name="nurse_schedule.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key = "download_gantt_excel"
             )
             # Download detailed schedule
             excel_bytes = create_shift_based_excel(schedule_data)
@@ -147,7 +148,8 @@ def main():
                 label="Download Individual Nurse Schedule",
                 data=excel_bytes,
                 file_name="individual_nurse_schedule.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_shift_excel"
             )
 
         else:
