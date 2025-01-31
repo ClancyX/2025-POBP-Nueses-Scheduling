@@ -4,18 +4,25 @@ import datetime
 import plotly.express as px
 import os
 import io
+import requests
 # For Excel creation
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Border, Side, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 from collections import defaultdict
-import requests
-import base64
 
 # Your modules
 from input import process_xlsx
 # main_process now returns (schedule_data, total_cost)
 from main import main_process
+
+
+@st.cache_resource
+def load_workbook_cached(shift_excel_bytes):
+    """ 缓存 Excel 加载，避免重复加载导致刷新 """
+    shift_file = io.BytesIO(shift_excel_bytes)
+    shift_file.seek(0)
+    return load_workbook(shift_file)
 
 
 def main():
@@ -24,56 +31,56 @@ def main():
 
     # 2) Inject Custom CSS & Google Font
     st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
 
-    html, body {
-      font-family: 'Inter', sans-serif;
-      background-color: #f7f9fc;
-      color: #333;
-    }
-    h1, h2, h3 {
-      color: #2f4b6e; /* A professional accent color */
-    }
-    /* Customize buttons */
-    div.stButton > button {
-      background-color: #2f4b6e;
-      color: #fff;
-      border: none;
-      padding: 0.6rem 1.2rem;
-      border-radius: 5px;
-    }
-    div.stButton > button:hover {
-      background-color: #3e5a80;
-    }
-    /* Header container style */
-    .header {
-      display: flex;
-      align-items: center;
-      background-color: #ffffff;
-      border-bottom: 2px solid #e2e8f0;
-      padding: 0.5rem 1rem;
-      margin-bottom: 1rem;
-    }
-    .header img {
-      height: 50px;
-      margin-right: 1rem;
-    }
-    .header h1 {
-      font-size: 1.5rem;
-      margin: 0;
-      padding: 0;
-    }
-    /* Footer style */
-    .footer {
-      background-color: #2f4b6e;
-      padding: 1rem;
-      text-align: center;
-      color: #fff;
-      margin-top: 2rem;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+        html, body {
+          font-family: 'Inter', sans-serif;
+          background-color: #f7f9fc;
+          color: #333;
+        }
+        h1, h2, h3 {
+          color: #2f4b6e; /* A professional accent color */
+        }
+        /* Customize buttons */
+        div.stButton > button {
+          background-color: #2f4b6e;
+          color: #fff;
+          border: none;
+          padding: 0.6rem 1.2rem;
+          border-radius: 5px;
+        }
+        div.stButton > button:hover {
+          background-color: #3e5a80;
+        }
+        /* Header container style */
+        .header {
+          display: flex;
+          align-items: center;
+          background-color: #ffffff;
+          border-bottom: 2px solid #e2e8f0;
+          padding: 0.5rem 1rem;
+          margin-bottom: 1rem;
+        }
+        .header img {
+          height: 50px;
+          margin-right: 1rem;
+        }
+        .header h1 {
+          font-size: 1.5rem;
+          margin: 0;
+          padding: 0;
+        }
+        /* Footer style */
+        .footer {
+          background-color: #2f4b6e;
+          padding: 1rem;
+          text-align: center;
+          color: #fff;
+          margin-top: 2rem;
+        }
+        </style>
+        """, unsafe_allow_html=True)
 
     # 3) Custom Header (Logo + Title)
     show_custom_header()
@@ -94,115 +101,101 @@ def main():
     else:
         show_upload_section()
 
-    # "Run Scheduling Algorithm" Button
-    if st.button("Run Scheduling Algorithm"):
+    # Initialize cached state
+    if "schedule_data" not in st.session_state:
+        st.session_state["schedule_data"] = None
+        st.session_state["total_cost"] = None
+
+    # Check if the data source has changed
+    data_source_changed = False
+    if data_source == "Manual Input":
+        if st.session_state.get("manual_shifts") or st.session_state.get("manual_tasks"):
+            data_source_changed = True
+    else:
+        if st.session_state.get("uploaded_file"):
+            data_source_changed = True
+
+    # Check if the data source has changed
+    if data_source_changed and st.button("Run Scheduling Algorithm"):
         with st.spinner("Running Scheduling..."):
-            schedule_data = None
-            total_cost = None  # We want to store total cost here
 
             if data_source == "Manual Input":
                 manual_shifts = st.session_state.get("manual_shifts", [])
                 manual_tasks = st.session_state.get("manual_tasks", [])
-                if not manual_shifts and not manual_tasks:
+                if not manual_shifts or not manual_tasks:
                     st.error("No manual data provided!")
                     return
-
                 tasks_dict = {str(day): [] for day in range(7)}
                 for task in manual_tasks:
                     task_day = str(task["date"])
                     task_without_date = {k: v for k, v in task.items() if k != "date"}
                     tasks_dict[task_day].append(task_without_date)
-
                 shifts_list = manual_shifts
-
-                # main_process returns (schedule_data, total_cost)
-                schedule_data, total_cost = main_process(tasks_dict, shifts_list)
-
-            else:  # "Upload Excel"
+            else:
                 uploaded_file = st.session_state.get("uploaded_file", None)
                 if not uploaded_file:
                     st.error("No file uploaded!")
                     return
                 shifts_list, tasks_dict = process_xlsx(uploaded_file)
-                # main_process => (schedule_data, total_cost)
-                schedule_data, total_cost = main_process(tasks_dict, shifts_list)
 
-        if schedule_data:
-            st.success("Scheduling Completed!")
-            # Show Gantt
-            show_gantt_chart(schedule_data)
-
-            # Display total cost
-            if total_cost is not None:
-                st.write(f"### Total Weekly Cost: {total_cost}")
-
+            # Run scheduling algorithm and cache results
+            schedule_data, total_cost = main_process(tasks_dict, shifts_list)
             st.session_state["schedule_data"] = schedule_data
-            if "gantt_excel_bytes" not in st.session_state:
-                st.session_state["gantt_excel_bytes"] = create_excel_gantt_xlsx(schedule_data)
-            if "shift_excel_bytes" not in st.session_state:
-                st.session_state["shift_excel_bytes"] = create_shift_based_excel(schedule_data)
+            st.session_state["total_cost"] = total_cost
+            st.session_state["gantt_excel_bytes"] = create_excel_gantt_xlsx(schedule_data)
+            st.session_state["shift_excel_bytes"] = create_shift_based_excel(schedule_data)
 
-            st.markdown(
-                download_button(
-                    st.session_state["gantt_excel_bytes"],
-                    "nurse_schedule.xlsx",
-                    "Download Gantt Excel"
-                ),
-                unsafe_allow_html=True
+    # Display cached results if available
+    if "schedule_data" in st.session_state and st.session_state["schedule_data"]:
+        st.success("Scheduling Completed!")
+
+        # Display Gantt chart
+        show_gantt_chart(st.session_state["schedule_data"])
+
+        # Display total cost
+        if "total_cost" in st.session_state:
+            st.write(f"### Total Weekly Cost: {st.session_state['total_cost']}")
+
+        # Download button for Gantt chart
+        if "gantt_excel_bytes" in st.session_state:
+            st.download_button(
+                label="Download as Excel",
+                data=st.session_state["gantt_excel_bytes"],
+                file_name="nurse_schedule.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-            st.markdown(
-                download_button(
-                    st.session_state["shift_excel_bytes"],
-                    "individual_nurse_schedule.xlsx",
-                    "Download Individual Nurse Schedule"
-                ),
-                unsafe_allow_html=True
+        # Preview Excel file
+        preview_excel()
+
+        # Download button for detailed schedule
+        if "shift_excel_bytes" in st.session_state:
+            st.download_button(
+                label="Download Individual Nurse Schedule",
+                data=st.session_state["shift_excel_bytes"],
+                file_name="individual_nurse_schedule.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-        else:
-            st.error("No schedule data returned or scheduling failed.")
-
-    # 5) Custom Footer
+        # Display custom footer at the page bottom
     show_custom_footer()
 
 
-def download_button(file_data, file_name, button_text):
+def get_cell_color(cell):
+    fill = cell.fill
+    if fill is None or fill.fill_type is None:
+        return "#FFFFFF"
 
-    b64_data = base64.b64encode(file_data).decode()
+    if fill.fgColor.type == "rgb" and fill.fgColor.rgb:
+        return f"#{fill.fgColor.rgb[2:]}"
 
-    href = f'''
-        <a href="data:application/octet-stream;base64,{b64_data}" download="{file_name}"
-           style="
-               display: inline-block;
-               padding: 0.6rem 1.2rem;
-               font-size: 16px;
-               color: black;
-               background-color: white;
-               text-align: center;
-               text-decoration: none;
-               border: 1px solid #d3d3d3;
-               border-radius: 5px;
-               margin: 10px 0;
-           ">
-           {button_text}
-        </a>
-    '''
-    return href
+    if fill.fgColor.type == "theme":
+        return "#D9EAD3"
 
-
-def get_template_file() -> bytes:
-    url = "https://raw.githubusercontent.com/ClancyX/2025-POBP-Nueses-Scheduling/main/Template%20with%20examples.xlsx"
-    response = requests.get(url)
-    if response.status_code == 200:
-        return response.content
-    else:
-        st.error("Download Failed")
-        return b""
+    return "#FFFFFF"
 
 
 def show_custom_header():
-
     """Render a custom header with the VUMC logo + title."""
     if os.path.exists("vumc_logo.png"):
         st.markdown(f"""
@@ -317,22 +310,37 @@ def show_manual_input():
         st.info("No manual tasks yet.")
 
 
+def get_template_file() -> bytes:
+    url = "https://raw.githubusercontent.com/ClancyX/2025-POBP-Nueses-Scheduling/main/Template%20with%20examples.xlsx"
+    response = requests.get(url)
+
+    if response.status_code == 200:
+        return response.content
+    else:
+        st.error("Unable to download the template file, please check the network connection")
+        return b""
+
+
 def show_upload_section():
     """File uploader for .xlsx tasks & shifts."""
     template_bytes = get_template_file()
+
     if template_bytes:
-        # Step 2: 使用 HTML 按钮替代 `st.download_button()`
-        st.markdown(
-            download_button(
-                template_bytes,
-                "Template with examples.xlsx",
-                "Download Template with examples"
-            ),
-            unsafe_allow_html=True
+        st.download_button(
+            label="Download Template with examples",
+            data=template_bytes,
+            file_name="Template with examples.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
     st.subheader("Upload Excel")
     file = st.file_uploader("Upload .xlsx with tasks & shifts", type=["xlsx"], key="upload_file")
     if file:
+        if "uploaded_file" in st.session_state and st.session_state["uploaded_file"] != file:
+            # 新文件上传时清空缓存
+            st.session_state["schedule_data"] = None
+            st.session_state["total_cost"] = None
+
         st.session_state["uploaded_file"] = file
         st.success("File uploaded. Ready for scheduling.")
     else:
@@ -492,9 +500,8 @@ def color_for_task(task_key_str: str) -> str:
 
     return palette[t_int % len(palette)]
 
+
 # Individual Nurse Schedule from here
-
-
 def find_available_rows(row_occupancy, start_time, end_time, required_rows):
     for row in range(2, 500):
         is_available = True
@@ -594,6 +601,76 @@ def create_shift_based_excel(schedule_data):
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
+
+
+def generate_html_table_with_merge(sheet):
+
+    merged_cells = sheet.merged_cells.ranges
+    merged_map = {}
+
+    for merge_range in merged_cells:
+        start_cell = merge_range.start_cell
+        merged_map[(merge_range.min_row, merge_range.min_col)] = (merge_range.max_row, merge_range.max_col)
+
+    table_html = "<table style='border-collapse:collapse; width:100%;'>"
+
+    for row_index, row in enumerate(sheet.iter_rows()):
+        table_html += "<tr>"
+        for col_index, cell in enumerate(row):
+            cell_key = (cell.row, cell.column)
+            cell_ref = f"{get_column_letter(cell.column)}{cell.row}"
+
+            column_style = "min-width: 75px; font-weight: bold;" if col_index == 0 else ""
+
+            if cell_key in merged_map:
+                max_row, max_col = merged_map[cell_key]
+                rowspan = max_row - cell.row + 1
+                colspan = max_col - cell.column + 1
+                bg_color = get_cell_color(cell)
+                table_html += (
+                    f'<td style="background-color:{bg_color}; padding:4px; border:1px solid #ccc; {column_style}" '
+                    f'rowspan="{rowspan}" colspan="{colspan}">' f'{cell.value or ""}</td>'
+                )
+            elif not any(cell_ref in merge_range for merge_range in merged_cells):
+                bg_color = get_cell_color(cell)
+                table_html += (
+                    f'<td style="background-color:{bg_color}; padding:4px; border:1px solid #ccc; {column_style}">'
+                    f'{cell.value or ""}</td>'
+                )
+        table_html += "</tr>"
+
+    table_html += "</table>"
+    return table_html
+
+
+def preview_excel():
+    if "shift_excel_bytes" not in st.session_state:
+        st.error("No scheduling data available. Please run the scheduling algorithm first.")
+        return
+
+    if "workbook" not in st.session_state:
+        st.session_state["workbook"] = load_workbook_cached(st.session_state["shift_excel_bytes"])
+    wb = st.session_state["workbook"]
+
+    sheets = wb.sheetnames
+    if "selected_sheet" not in st.session_state:
+        st.session_state["selected_sheet"] = sheets[0]
+        st.session_state["html_preview"] = generate_html_table_with_merge(wb[sheets[0]])
+
+    selected_sheet = st.selectbox("Select a sheet to preview", sheets,
+                                  index=sheets.index(st.session_state["selected_sheet"]), key="sheet_selector")
+
+    if selected_sheet != st.session_state["selected_sheet"]:
+        st.session_state["selected_sheet"] = selected_sheet
+        st.session_state["html_preview"] = generate_html_table_with_merge(wb[selected_sheet])
+
+    st.write(f"### Preview of Sheet: {st.session_state['selected_sheet']}")
+    st.markdown(
+        f'<div style="overflow:auto; max-width:100%; max-height:500px;">'
+        f'{st.session_state.get("html_preview", "Loading...")}'
+        f'</div>',
+        unsafe_allow_html=True
+    )
 
 
 if __name__ == "__main__":
