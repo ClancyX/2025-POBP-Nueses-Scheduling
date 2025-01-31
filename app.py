@@ -9,11 +9,14 @@ from openpyxl import Workbook
 from openpyxl.styles import Border, Side, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 from collections import defaultdict
+import requests
+import base64
 
 # Your modules
 from input import process_xlsx
 # main_process now returns (schedule_data, total_cost)
 from main import main_process
+
 
 def main():
     # 1) Basic Page Config
@@ -133,23 +136,28 @@ def main():
             if total_cost is not None:
                 st.write(f"### Total Weekly Cost: {total_cost}")
 
-            # Download as Excel (matrix Gantt)
-            excel_bytes = create_excel_gantt_xlsx(schedule_data)
-            st.download_button(
-                label="Download as Excel",
-                data=excel_bytes,
-                file_name="nurse_schedule.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key = "download_gantt_excel"
+            st.session_state["schedule_data"] = schedule_data
+            if "gantt_excel_bytes" not in st.session_state:
+                st.session_state["gantt_excel_bytes"] = create_excel_gantt_xlsx(schedule_data)
+            if "shift_excel_bytes" not in st.session_state:
+                st.session_state["shift_excel_bytes"] = create_shift_based_excel(schedule_data)
+
+            st.markdown(
+                download_button(
+                    st.session_state["gantt_excel_bytes"],
+                    "nurse_schedule.xlsx",
+                    "Download Gantt Excel"
+                ),
+                unsafe_allow_html=True
             )
-            # Download detailed schedule
-            excel_bytes = create_shift_based_excel(schedule_data)
-            st.download_button(
-                label="Download Individual Nurse Schedule",
-                data=excel_bytes,
-                file_name="individual_nurse_schedule.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_shift_excel"
+
+            st.markdown(
+                download_button(
+                    st.session_state["shift_excel_bytes"],
+                    "individual_nurse_schedule.xlsx",
+                    "Download Individual Nurse Schedule"
+                ),
+                unsafe_allow_html=True
             )
 
         else:
@@ -158,7 +166,30 @@ def main():
     # 5) Custom Footer
     show_custom_footer()
 
-import requests
+
+def download_button(file_data, file_name, button_text):
+
+    b64_data = base64.b64encode(file_data).decode()
+
+    href = f'''
+        <a href="data:application/octet-stream;base64,{b64_data}" download="{file_name}"
+           style="
+               display: inline-block;
+               padding: 0.6rem 1.2rem;
+               font-size: 16px;
+               color: black;
+               background-color: white;
+               text-align: center;
+               text-decoration: none;
+               border: 1px solid #d3d3d3;
+               border-radius: 5px;
+               margin: 10px 0;
+           ">
+           {button_text}
+        </a>
+    '''
+    return href
+
 
 def get_template_file() -> bytes:
     url = "https://raw.githubusercontent.com/ClancyX/2025-POBP-Nueses-Scheduling/main/Template%20with%20examples.xlsx"
@@ -169,7 +200,9 @@ def get_template_file() -> bytes:
         st.error("Download Failed")
         return b""
 
+
 def show_custom_header():
+
     """Render a custom header with the VUMC logo + title."""
     if os.path.exists("vumc_logo.png"):
         st.markdown(f"""
@@ -288,11 +321,14 @@ def show_upload_section():
     """File uploader for .xlsx tasks & shifts."""
     template_bytes = get_template_file()
     if template_bytes:
-        st.download_button(
-            label="Download Template with examples",
-            data=template_bytes,
-            file_name="Template with examples.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        # Step 2: 使用 HTML 按钮替代 `st.download_button()`
+        st.markdown(
+            download_button(
+                template_bytes,
+                "Template with examples.xlsx",
+                "Download Template with examples"
+            ),
+            unsafe_allow_html=True
         )
     st.subheader("Upload Excel")
     file = st.file_uploader("Upload .xlsx with tasks & shifts", type=["xlsx"], key="upload_file")
@@ -314,7 +350,7 @@ def show_gantt_chart(schedule_data):
         elif isinstance(day_key, str) and day_key.isdigit():
             day_index = int(day_key)
 
-        base_day = datetime.datetime(2025,1,1) + datetime.timedelta(days=day_index)
+        base_day = datetime.datetime(2025, 1, 1) + datetime.timedelta(days=day_index)
 
         for task_id, val in jobs_dict.items():
             if len(val) < 2:
@@ -458,18 +494,6 @@ def color_for_task(task_key_str: str) -> str:
 
 # Individual Nurse Schedule from here
 
-COLOR_PALETTE = [
-    "FFCC00", "FF5733", "33FF57", "3385FF", "DA33FF",
-    "FF33A6", "33FFF2", "FF8C33", "33FF85", "4D33FF",
-    "FF3333", "33FFA6", "A633FF", "FFC733", "33D4FF"
-]
-
-def color_for_task(task_id):
-    task_id = int(task_id)
-    index = task_id % len(COLOR_PALETTE)
-    return COLOR_PALETTE[index]
-
-
 
 def find_available_rows(row_occupancy, start_time, end_time, required_rows):
     for row in range(2, 500):
@@ -481,6 +505,7 @@ def find_available_rows(row_occupancy, start_time, end_time, required_rows):
         if is_available:
             return row
     return None
+
 
 def create_shift_based_excel(schedule_data):
     thin_border = Border(left=Side(style='thin'),
@@ -535,7 +560,8 @@ def create_shift_based_excel(schedule_data):
                     if t == shift_start_block or task_id not in day_shift_data[day][shift_id][t - 1]:
                         merge_start = t
                         merge_end = t
-                        while merge_end + 1 <= shift_end_block and task_id in day_shift_data[day][shift_id][merge_end + 1]:
+                        while (merge_end + 1 <= shift_end_block and
+                               task_id in day_shift_data[day][shift_id][merge_end + 1]):
                             merge_end += 1
 
                         start_row = find_available_rows(row_occupancy, merge_start, merge_end, required_rows)
@@ -549,7 +575,8 @@ def create_shift_based_excel(schedule_data):
                         cell.fill = PatternFill("solid", fgColor=color_for_task(str(task_id)))
 
                         ws.merge_cells(start_row=start_row, end_row=end_row,
-                                       start_column=merge_start - shift_start_block + 2, end_column=merge_end - shift_start_block + 2)
+                                       start_column=merge_start - shift_start_block + 2,
+                                       end_column=merge_end - shift_start_block + 2)
 
                         for t_block in range(merge_start, merge_end + 1):
                             for row in range(start_row, end_row + 1):
@@ -567,6 +594,7 @@ def create_shift_based_excel(schedule_data):
     output = io.BytesIO()
     wb.save(output)
     return output.getvalue()
+
 
 if __name__ == "__main__":
     main()
